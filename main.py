@@ -1,4 +1,7 @@
 import os
+
+# ── Ensure HOME/bin is in PATH so ffmpeg binary is found at runtime ──
+os.environ["PATH"] = os.path.expanduser("~/bin") + ":" + os.environ.get("PATH", "")
 import asyncio
 import logging
 import re
