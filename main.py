@@ -101,7 +101,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🎬 *تحويل الصيغ*\n"
         "أرسل أي ملف فيديو أو صوت وسأحوله لصيغة تختارها.\n\n"
         "🔍 *بحث يوتيوب*\n"
-        "استخدم: `/بحث كلمة البحث`\n\n"
+        "استخدم: `/yt كلمة البحث`\n\n"
         "📸 *تحميل إنستقرام*\n"
         "أرسل رابط أي منشور أو ريل.\n\n"
         "📹 *تحميل يوتيوب*\n"
@@ -113,7 +113,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *المساعدة*\n\n"
-        "• `/بحث <نص>` — بحث في يوتيوب\n"
+        "• `/yt <نص>` — بحث في يوتيوب\n"
         "• أرسل رابط يوتيوب — للتحميل الفوري\n"
         "• أرسل رابط إنستقرام — لتحميل المقطع\n"
         "• أرسل ملف فيديو/صوت — لتحويل الصيغة\n\n"
@@ -127,7 +127,7 @@ async def yt_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args)
     if not query:
         await update.message.reply_text(
-            "❗ أرسل كلمة البحث بعد الأمر.\nمثال: `/بحث أغاني عربية`",
+            "❗ أرسل كلمة البحث بعد الأمر.\nمثال: `/yt أغاني عربية`",
             parse_mode="Markdown"
         )
         return
@@ -345,12 +345,17 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if msg.text and msg.text.startswith("بحث "):
+        ctx.args = msg.text[4:].split()
+        await yt_search(update, ctx)
+        return
+
     if msg.text:
         await msg.reply_text(
             "❓ لم أفهم. أرسل:\n"
             "• رابط يوتيوب أو إنستقرام\n"
             "• ملف فيديو/صوت للتحويل\n"
-            "• `/بحث كلمة البحث` للبحث في يوتيوب"
+            "• `/yt كلمة البحث` للبحث في يوتيوب"
         )
 
 # ─── تحويل الصيغ ───────────────────────────────────────────────────────────────
@@ -405,7 +410,8 @@ async def async_main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("help",   help_cmd))
-    app.add_handler(CommandHandler("بحث",    yt_search))
+    app.add_handler(CommandHandler("yt", yt_search))
+    app.add_handler(CommandHandler("search", yt_search))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
 
