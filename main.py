@@ -186,9 +186,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # تحويل صيغة
     elif data.startswith("cv|"):
-        parts = data.split("|")   # cv | file_id | fmt
+        parts = data.split("|")   # cv | sid | fmt
         if len(parts) == 3:
-            await do_convert(query.message, parts[1], parts[2])
+            real_fid = get_url(parts[1])  # resolve from cache
+            if real_fid:
+                await do_convert(query.message, real_fid, parts[2])
+            else:
+                await query.message.reply_text("❌ انتهت صلاحية الزر، أرسل الملف مجدداً.")
 
 # ─── Message handler ───────────────────────────────────────────────────────────
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -215,18 +219,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── ملف للتحويل ──
     file_obj = msg.video or msg.audio or msg.voice or msg.document
     if file_obj:
-        fid = file_obj.file_id
-        # callback_data max 64 bytes: "cv|" (3) + fid (~52) + "|mp3" (4) = ~59 ✅
+        # file_id طويل جداً → نحفظه في cache ونستخدم ID قصير في الزر
+        sid = cache_url(file_obj.file_id)
         keyboard = [
             [
-                InlineKeyboardButton("🎵 MP3",  callback_data=f"cv|{fid}|mp3"),
-                InlineKeyboardButton("🎤 OGG",  callback_data=f"cv|{fid}|ogg"),
-                InlineKeyboardButton("🔊 WAV",  callback_data=f"cv|{fid}|wav"),
+                InlineKeyboardButton("🎵 MP3",  callback_data=f"cv|{sid}|mp3"),
+                InlineKeyboardButton("🎤 OGG",  callback_data=f"cv|{sid}|ogg"),
+                InlineKeyboardButton("🔊 WAV",  callback_data=f"cv|{sid}|wav"),
             ],
             [
-                InlineKeyboardButton("🎬 MP4",  callback_data=f"cv|{fid}|mp4"),
-                InlineKeyboardButton("📼 WEBM", callback_data=f"cv|{fid}|webm"),
-                InlineKeyboardButton("🎙 AAC",  callback_data=f"cv|{fid}|aac"),
+                InlineKeyboardButton("🎬 MP4",  callback_data=f"cv|{sid}|mp4"),
+                InlineKeyboardButton("📼 WEBM", callback_data=f"cv|{sid}|webm"),
+                InlineKeyboardButton("🎙 AAC",  callback_data=f"cv|{sid}|aac"),
             ],
         ]
         await msg.reply_text(
