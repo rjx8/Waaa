@@ -33,8 +33,7 @@ RENDER_URL = os.environ.get("RENDER_URL", "")
 TEMP_DIR   = Path("/tmp/tgbot")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# ─── URL cache: short_id → full_url ──────────────────────────────────────────
-# Avoids putting long URLs in callback_data (max 64 bytes)
+# ─── URL cache ────────────────────────────────────────────────────────────────
 url_cache: dict[str, str] = {}
 
 def cache_url(url: str) -> str:
@@ -45,7 +44,7 @@ def cache_url(url: str) -> str:
 def get_url(short: str) -> str:
     return url_cache.get(short, "")
 
-# ─── Keep-Alive Flask server ──────────────────────────────────────────────────
+# ─── Keep-Alive Flask ─────────────────────────────────────────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -73,9 +72,6 @@ def keep_alive_ping():
 INSTAGRAM_PATTERN = re.compile(
     r"https?://(www\.)?(instagram\.com|instagr\.am)/(p|reel|tv)/[\w-]+"
 )
-YOUTUBE_PATTERN = re.compile(
-    r"https?://(www\.)?(youtube\.com/watch\?[\S]+|youtu\.be/[\w-]+|youtube\.com/shorts/[\w-]+)"
-)
 
 def unique_path(ext: str) -> Path:
     return TEMP_DIR / f"{uuid.uuid4().hex}.{ext}"
@@ -83,177 +79,13 @@ def unique_path(ext: str) -> Path:
 def cleanup(*paths):
     for p in paths:
         try:
-            Path(p).unlink(missing_ok=True)
+            Path(str(p)).unlink(missing_ok=True)
         except Exception:
             pass
 
-def fmt_duration(duration) -> str:
-    try:
-        d = int(float(duration))
-        return f"{d//60}:{d%60:02d}"
-    except Exception:
-        return "?:??"
-
-# ─── /start & /help ───────────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "👋 *مرحباً! أنا بوت متعدد المهام*\n\n"
-        "🎬 *تحويل الصيغ*\n"
-        "أرسل أي ملف فيديو أو صوت وسأحوله لصيغة تختارها.\n\n"
-        "🔍 *بحث يوتيوب*\n"
-        "استخدم: `/yt كلمة البحث`\n\n"
-        "📸 *تحميل إنستقرام*\n"
-        "أرسل رابط أي منشور أو ريل.\n\n"
-        "📹 *تحميل يوتيوب*\n"
-        "أرسل رابط أي فيديو يوتيوب مباشرة.\n\n"
-        "⚙️ /help لمزيد من المعلومات."
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📖 *المساعدة*\n\n"
-        "• `/yt <نص>` — بحث في يوتيوب\n"
-        "• أرسل رابط يوتيوب — للتحميل الفوري\n"
-        "• أرسل رابط إنستقرام — لتحميل المقطع\n"
-        "• أرسل ملف فيديو/صوت — لتحويل الصيغة\n\n"
-        "📌 *الصيغ المدعومة:*\n"
-        "`mp3 | mp4 | ogg | wav | aac | webm`"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ─── بحث يوتيوب ───────────────────────────────────────────────────────────────
-async def yt_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(ctx.args)
-    if not query:
-        await update.message.reply_text(
-            "❗ أرسل كلمة البحث بعد الأمر.\nمثال: `/yt أغاني عربية`",
-            parse_mode="Markdown"
-        )
-        return
-
-    msg = await update.message.reply_text("🔍 جاري البحث في يوتيوب...")
-
-    try:
-        loop = asyncio.get_event_loop()
-        ydl_opts = {"quiet": True, "extract_flat": True}
-        info = await loop.run_in_executor(
-            None,
-            lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(f"ytsearch5:{query}", download=False)
-        )
-
-        results = info.get("entries", [])
-        if not results:
-            await msg.edit_text("❌ لم أجد نتائج.")
-            return
-
-        keyboard = []
-        text_lines = ["🎬 *نتائج البحث:*\n"]
-
-        for i, entry in enumerate(results[:5], 1):
-            title   = entry.get("title", "بدون عنوان")[:50]
-            dur_str = fmt_duration(entry.get("duration", 0))
-            vid_id  = entry.get("id", "")
-            url     = f"https://youtu.be/{vid_id}"
-            sid     = cache_url(url)   # short 8-char id
-
-            text_lines.append(f"{i}. *{title}* ({dur_str})")
-            # Two buttons per result: audio | video — callback max ~20 chars ✅
-            keyboard.append([
-                InlineKeyboardButton(f"🎵 {i}. صوت", callback_data=f"yta|{sid}"),
-                InlineKeyboardButton(f"🎬 {i}. مقطع", callback_data=f"ytv|{sid}"),
-            ])
-
-        await msg.edit_text(
-            "\n".join(text_lines),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    except Exception as e:
-        logger.error(f"YT search error: {e}")
-        await msg.edit_text("❌ حدث خطأ أثناء البحث.")
-
-# ─── تحميل فيديو (مقطع) ───────────────────────────────────────────────────────
-async def download_as_video(message, url: str, caption: str = ""):
-    msg = await message.reply_text("⏳ جاري تحميل المقطع...")
-    out_path = unique_path("mp4")
-
-    ydl_opts = {
-        "format": "best[ext=mp4][filesize<50M]/best[filesize<50M]/best",
-        "outtmpl": str(out_path),
-        "quiet": True,
-    }
-
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
-
-        final = _find_file(out_path)
-        if not final:
-            await msg.edit_text("❌ فشل التحميل.")
-            return
-
-        if final.stat().st_size > 50 * 1024 * 1024:
-            await msg.edit_text("❌ الملف أكبر من 50 ميجا (حد تيليغرام).")
-            cleanup(final)
-            return
-
-        await msg.edit_text("📤 جاري الرفع...")
-        with open(final, "rb") as f:
-            await message.reply_video(f, caption=caption or "🎬 تم التحميل", supports_streaming=True)
-        await msg.delete()
-
-    except Exception as e:
-        logger.error(f"Video download error: {e}")
-        await msg.edit_text(f"❌ فشل التحميل:\n`{str(e)[:200]}`", parse_mode="Markdown")
-    finally:
-        cleanup(out_path)
-
-# ─── تحميل صوت فقط ────────────────────────────────────────────────────────────
-async def download_as_audio(message, url: str, caption: str = ""):
-    msg = await message.reply_text("⏳ جاري تحميل الصوت...")
-    out_path = unique_path("mp3")
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": str(out_path),
-        "quiet": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-        "ffmpeg_location": os.path.expanduser("~/bin"),
-    }
-
-    try:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
-
-        # yt-dlp adds .mp3 extension
-        final = _find_file(out_path, preferred_ext="mp3")
-        if not final:
-            await msg.edit_text("❌ فشل التحميل.")
-            return
-
-        await msg.edit_text("📤 جاري الرفع...")
-        with open(final, "rb") as f:
-            await message.reply_audio(f, caption=caption or "🎵 تم التحميل")
-        await msg.delete()
-
-    except Exception as e:
-        logger.error(f"Audio download error: {e}")
-        await msg.edit_text(f"❌ فشل التحميل:\n`{str(e)[:200]}`", parse_mode="Markdown")
-    finally:
-        cleanup(out_path)
-        # cleanup possible .mp3 variant
-        mp3_path = Path(str(out_path) + ".mp3")
-        cleanup(mp3_path)
-
-def _find_file(base_path: Path, preferred_ext: str = None) -> Path | None:
+def find_file(base_path: Path, preferred_ext: str = None) -> Path | None:
     if base_path.exists():
         return base_path
-    # yt-dlp may rename
     candidates = list(TEMP_DIR.glob(f"{base_path.stem}.*"))
     if preferred_ext:
         for c in candidates:
@@ -261,46 +93,118 @@ def _find_file(base_path: Path, preferred_ext: str = None) -> Path | None:
                 return c
     return candidates[0] if candidates else None
 
+# ─── /start & /help ───────────────────────────────────────────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "👋 *مرحباً!*\n\n"
+        "🔄 *تحويل الصيغ*\n"
+        "أرسل أي ملف فيديو أو صوت وسأحوله للصيغة التي تختارها.\n\n"
+        "📸 *تحميل إنستقرام*\n"
+        "أرسل رابط أي ريل أو منشور وسأحمله لك.\n\n"
+        "الصيغ المدعومة: `MP3 | OGG | WAV | AAC | MP4 | WEBM`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await start(update, ctx)
+
+# ─── تحميل إنستقرام ───────────────────────────────────────────────────────────
+async def download_instagram(message, url: str, as_audio: bool):
+    if as_audio:
+        msg = await message.reply_text("⏳ جاري تحميل الصوت...")
+        out  = unique_path("mp3")
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(out),
+            "quiet": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "ffmpeg_location": os.path.expanduser("~/bin"),
+        }
+    else:
+        msg = await message.reply_text("⏳ جاري تحميل المقطع...")
+        out  = unique_path("mp4")
+        opts = {
+            "format": "best[ext=mp4][filesize<50M]/best[filesize<50M]/best",
+            "outtmpl": str(out),
+            "quiet": True,
+        }
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(opts).download([url]))
+
+        ext   = "mp3" if as_audio else None
+        final = find_file(out, preferred_ext=ext)
+        if not final:
+            await msg.edit_text("❌ فشل التحميل.")
+            return
+
+        if final.stat().st_size > 50 * 1024 * 1024:
+            await msg.edit_text("❌ الملف أكبر من 50 ميجا.")
+            cleanup(final)
+            return
+
+        await msg.edit_text("📤 جاري الرفع...")
+        with open(final, "rb") as f:
+            if as_audio:
+                await message.reply_audio(f, caption="🎵 صوت من إنستقرام")
+            else:
+                await message.reply_video(f, caption="📸 مقطع من إنستقرام", supports_streaming=True)
+        await msg.delete()
+
+    except Exception as e:
+        logger.error(f"Instagram download error: {e}")
+        await msg.edit_text(f"❌ فشل التحميل:\n`{str(e)[:200]}`", parse_mode="Markdown")
+    finally:
+        cleanup(out)
+
 # ─── Callback handler ──────────────────────────────────────────────────────────
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data  = query.data
 
-    # YouTube audio
-    if data.startswith("yta|"):
-        sid = data[4:]
-        url = get_url(sid)
+    # إنستقرام صوت
+    if data.startswith("iga|"):
+        url = get_url(data[4:])
         if url:
-            await download_as_audio(query.message, url, "🎵 صوت من يوتيوب")
+            await download_instagram(query.message, url, as_audio=True)
         else:
-            await query.message.reply_text("❌ انتهت صلاحية الزر، ابحث مجدداً.")
+            await query.message.reply_text("❌ انتهت صلاحية الزر، أرسل الرابط مجدداً.")
 
-    # YouTube video
-    elif data.startswith("ytv|"):
-        sid = data[4:]
-        url = get_url(sid)
+    # إنستقرام مقطع
+    elif data.startswith("igv|"):
+        url = get_url(data[4:])
         if url:
-            await download_as_video(query.message, url, "🎬 مقطع من يوتيوب")
+            await download_instagram(query.message, url, as_audio=False)
         else:
-            await query.message.reply_text("❌ انتهت صلاحية الزر، ابحث مجدداً.")
+            await query.message.reply_text("❌ انتهت صلاحية الزر، أرسل الرابط مجدداً.")
 
     # تحويل صيغة
-    elif data.startswith("convert|"):
-        _, file_id, target_fmt = data.split("|")
-        await do_convert(query.message, file_id, target_fmt)
+    elif data.startswith("cv|"):
+        parts = data.split("|")   # cv | file_id | fmt
+        if len(parts) == 3:
+            await do_convert(query.message, parts[1], parts[2])
 
 # ─── Message handler ───────────────────────────────────────────────────────────
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    if not msg:
+        return
 
-    # إنستقرام
+    logger.info(f"MSG type: text={bool(msg.text)} video={bool(msg.video)} audio={bool(msg.audio)} voice={bool(msg.voice)} doc={bool(msg.document)}")
+
+    # ── إنستقرام ──
     if msg.text and INSTAGRAM_PATTERN.search(msg.text):
         url = INSTAGRAM_PATTERN.search(msg.text).group(0)
         sid = cache_url(url)
         keyboard = [[
-            InlineKeyboardButton("🎵 صوت",  callback_data=f"yta|{sid}"),
-            InlineKeyboardButton("🎬 مقطع", callback_data=f"ytv|{sid}"),
+            InlineKeyboardButton("🎵 صوت",  callback_data=f"iga|{sid}"),
+            InlineKeyboardButton("🎬 مقطع", callback_data=f"igv|{sid}"),
         ]]
         await msg.reply_text(
             "📸 رابط إنستقرام — تريد صوت أو مقطع؟",
@@ -308,54 +212,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # يوتيوب
-    if msg.text and YOUTUBE_PATTERN.search(msg.text):
-        url = YOUTUBE_PATTERN.search(msg.text).group(0)
-        sid = cache_url(url)
-        keyboard = [[
-            InlineKeyboardButton("🎵 صوت",  callback_data=f"yta|{sid}"),
-            InlineKeyboardButton("🎬 مقطع", callback_data=f"ytv|{sid}"),
-        ]]
-        await msg.reply_text(
-            "🎬 رابط يوتيوب — تريد صوت أو مقطع؟",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
-    # ملف للتحويل
+    # ── ملف للتحويل ──
     file_obj = msg.video or msg.audio or msg.voice or msg.document
     if file_obj:
         fid = file_obj.file_id
+        # callback_data max 64 bytes: "cv|" (3) + fid (~52) + "|mp3" (4) = ~59 ✅
         keyboard = [
             [
-                InlineKeyboardButton("🎵 MP3",  callback_data=f"convert|{fid}|mp3"),
-                InlineKeyboardButton("🎤 OGG",  callback_data=f"convert|{fid}|ogg"),
-                InlineKeyboardButton("🔊 WAV",  callback_data=f"convert|{fid}|wav"),
+                InlineKeyboardButton("🎵 MP3",  callback_data=f"cv|{fid}|mp3"),
+                InlineKeyboardButton("🎤 OGG",  callback_data=f"cv|{fid}|ogg"),
+                InlineKeyboardButton("🔊 WAV",  callback_data=f"cv|{fid}|wav"),
             ],
             [
-                InlineKeyboardButton("🎬 MP4",  callback_data=f"convert|{fid}|mp4"),
-                InlineKeyboardButton("📼 WEBM", callback_data=f"convert|{fid}|webm"),
-                InlineKeyboardButton("🎙️ AAC",  callback_data=f"convert|{fid}|aac"),
+                InlineKeyboardButton("🎬 MP4",  callback_data=f"cv|{fid}|mp4"),
+                InlineKeyboardButton("📼 WEBM", callback_data=f"cv|{fid}|webm"),
+                InlineKeyboardButton("🎙 AAC",  callback_data=f"cv|{fid}|aac"),
             ],
         ]
         await msg.reply_text(
-            "🔄 *اختر الصيغة التي تريد التحويل إليها:*",
+            "🔄 *اختر الصيغة:*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
-    if msg.text and msg.text.startswith("بحث "):
-        ctx.args = msg.text[4:].split()
-        await yt_search(update, ctx)
-        return
-
+    # ── نص عادي ──
     if msg.text:
         await msg.reply_text(
-            "❓ لم أفهم. أرسل:\n"
-            "• رابط يوتيوب أو إنستقرام\n"
-            "• ملف فيديو/صوت للتحويل\n"
-            "• `/yt كلمة البحث` للبحث في يوتيوب"
+            "أرسل:\n"
+            "• رابط إنستقرام لتحميله\n"
+            "• ملف فيديو أو صوت لتحويل صيغته"
         )
 
 # ─── تحويل الصيغ ───────────────────────────────────────────────────────────────
@@ -371,8 +257,8 @@ async def do_convert(message, file_id: str, target_fmt: str):
         tg_file = await bot.get_file(file_id)
         await tg_file.download_to_drive(str(input_path))
 
-        audio_formats = {"mp3", "ogg", "wav", "aac", "opus", "flac"}
-        if target_fmt in audio_formats:
+        audio_fmts = {"mp3", "ogg", "wav", "aac", "opus", "flac"}
+        if target_fmt in audio_fmts:
             cmd = ["ffmpeg", "-y", "-i", str(input_path),
                    "-vn", "-ar", "44100", "-ac", "2", str(output_path)]
         else:
@@ -389,7 +275,7 @@ async def do_convert(message, file_id: str, target_fmt: str):
         with open(output_path, "rb") as f:
             if target_fmt in {"ogg", "opus"}:
                 await message.reply_voice(f, caption=f"🎤 {target_fmt.upper()}")
-            elif target_fmt in audio_formats:
+            elif target_fmt in audio_fmts:
                 await message.reply_audio(f, caption=f"🎵 {target_fmt.upper()}")
             else:
                 await message.reply_video(f, caption=f"🎬 {target_fmt.upper()}")
@@ -408,12 +294,16 @@ async def async_main():
     threading.Thread(target=keep_alive_ping, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("help",   help_cmd))
-    app.add_handler(CommandHandler("yt", yt_search))
-    app.add_handler(CommandHandler("search", yt_search))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help",  help_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+
+    # handlers منفصلة لكل نوع ملف — أكثر موثوقية من filters.ALL
+    app.add_handler(MessageHandler(filters.VIDEO,    handle_message))
+    app.add_handler(MessageHandler(filters.AUDIO,    handle_message))
+    app.add_handler(MessageHandler(filters.VOICE,    handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("🤖 Bot started!")
     await app.initialize()
